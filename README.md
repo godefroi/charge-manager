@@ -78,6 +78,123 @@ This enables smart charging scenarios where EV charging can be optimized based o
 
 ## Configuration
 
+The application supports configuration through multiple methods, in order of precedence:
+
+1. **Environment Variables** (highest priority)
+2. **.NET User Secrets** (local development)
+3. **appsettings.json** file (lowest priority)
+
+### Configuration Methods
+
+#### Environment Variables
+
+All configuration can be set using environment variables, which is particularly useful for Docker deployments and cloud environments. Environment variables override values from `appsettings.json` and user secrets.
+
+**Environment Variable Naming Convention:**
+
+Environment variables use the format `DOTNET_{ConfigurationPath}`. The configuration path is derived from the JSON hierarchy using double underscores (`__`) to separate nested levels. For example, the JSON path `Envoy.Username` becomes `DOTNET_Envoy__Username`.
+
+> **Note:** You can also use the `ASPNETCORE_` prefix instead of `DOTNET_` (e.g., `ASPNETCORE_Envoy__Username`). Both prefixes work identically.
+
+**Envoy Configuration:**
+```
+DOTNET_Envoy__Username=your_envoy_username
+DOTNET_Envoy__Password=your_envoy_password
+DOTNET_Envoy__DeviceSerial=your_device_serial_number
+DOTNET_Envoy__EnvoyUrl=https://envoy.local
+DOTNET_Envoy__SessionTimeout=00:09:00
+DOTNET_Envoy__TopicPrefix=envoysolar
+```
+
+**MQTT Configuration:**
+```
+DOTNET_Mqtt__Host=core-mosquitto
+DOTNET_Mqtt__Port=1883
+DOTNET_Mqtt__ClientId=charge-manager
+DOTNET_Mqtt__Username=mqtt_username
+DOTNET_Mqtt__Password=mqtt_password
+```
+
+**OpenEVSE Configuration:**
+```
+DOTNET_OpenEvse__TopicPrefix=openevse
+```
+
+**OpenTelemetry Configuration:**
+```
+DOTNET_Otlp__Endpoint=http://localhost:4318/v1/metrics
+DOTNET_Otlp__ExportIntervalSeconds=30
+DOTNET_Otlp__Protocol=HttpProtobuf
+DOTNET_Otlp__Headers__Authorization=Bearer your-token-here
+```
+
+**Logging Configuration:**
+```
+DOTNET_Logging__LogLevel__Default=Information
+DOTNET_Logging__LogLevel__ChargeManager__Services__EnvoyCollectorService=Information
+```
+
+**Docker with .env File:**
+
+When running via Docker, you can use an `.env` file to manage environment variables. Create a `.env` file in your project directory:
+
+```env
+# Envoy Configuration
+DOTNET_Envoy__Username=your_envoy_username
+DOTNET_Envoy__Password=your_envoy_password
+DOTNET_Envoy__DeviceSerial=123456789
+DOTNET_Envoy__EnvoyUrl=https://envoy.local
+DOTNET_Envoy__SessionTimeout=00:09:00
+DOTNET_Envoy__TopicPrefix=envoysolar
+
+# MQTT Configuration
+DOTNET_Mqtt__Host=mosquitto
+DOTNET_Mqtt__Port=1883
+DOTNET_Mqtt__ClientId=charge-manager
+DOTNET_Mqtt__Username=mqtt_user
+DOTNET_Mqtt__Password=mqtt_password
+
+# OpenEVSE Configuration
+DOTNET_OpenEvse__TopicPrefix=openevse
+
+# OpenTelemetry Configuration (Optional)
+DOTNET_Otlp__Endpoint=http://otel-collector:4318/v1/metrics
+DOTNET_Otlp__ExportIntervalSeconds=30
+```
+
+Then run the Docker container with the `--env-file` flag:
+
+```bash
+docker run --env-file .env godefroi/charge-manager:latest
+```
+
+Or with docker-compose:
+
+```yaml
+version: '3.8'
+services:
+  charge-manager:
+    image: godefroi/charge-manager:latest
+    env_file: .env
+    networks:
+      - local
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    networks:
+      - local
+
+networks:
+  local:
+```
+
+Run with:
+```bash
+docker-compose up
+```
+
 ### Quick Start
 
 1. Copy `appsettings.example.json` to `appsettings.json`:
@@ -87,7 +204,9 @@ This enables smart charging scenarios where EV charging can be optimized based o
 
 2. Edit `appsettings.json` and update the required configuration sections below
 
-3. For sensitive data (passwords, tokens), use .NET user secrets (recommended - see [Using User Secrets](#using-user-secrets-recommended) section)
+3. For sensitive data (passwords, tokens), use either:
+   - **Environment Variables** (recommended for Docker) - see [Environment Variables](#environment-variables) section
+   - **.NET User Secrets** (recommended for local development) - see [Using User Secrets](#using-user-secrets-recommended) section
 
 ### Configuration Sections
 
