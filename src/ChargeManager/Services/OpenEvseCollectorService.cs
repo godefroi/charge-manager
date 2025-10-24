@@ -23,7 +23,7 @@ public class OpenEvseCollectorService : BaseCollectorService, IHostedService, ID
 	private readonly Dictionary<string, string> _messageBatch = [];
 	private readonly Lock _batchLock = new();
 	private readonly Timer _debounceTimer;
-	private const int DebounceDelayMs = 100; // Wait 100ms after last message before processing batch
+	private const int DebounceDelayMs = 250; // Wait 100ms after last message before processing batch
 
 	public OpenEvseCollectorService([FromKeyedServices("openevse")]IHiveMQClient mqttClient, MetricsService metricsService, IOptions<OpenEvseConfiguration> options, [FromKeyedServices("ev_energy")]Channel<EnergyRecord> evChannel, ILogger<OpenEvseCollectorService> logger)
 	{
@@ -82,11 +82,6 @@ public class OpenEvseCollectorService : BaseCollectorService, IHostedService, ID
 			// stop the debounce timer and process any remaining batch
 			lock (_batchLock) {
 				_debounceTimer.Change(Timeout.Infinite, Timeout.Infinite);
-
-				// process any remaining messages in the batch
-				if (_messageBatch.Count > 0) {
-					ProcessBatch();
-				}
 			}
 
 			if (_subscriptions.Count > 0) {
@@ -149,102 +144,64 @@ public class OpenEvseCollectorService : BaseCollectorService, IHostedService, ID
 
 	private void ProcessBatch()
 	{
+		var topicPrefix = _options.TopicPrefix.TrimEnd('/');
+
 		try {
 			// create a snapshot of the current batch
-			var batchSnapshot = new Dictionary<string, string>(_messageBatch);
-			_messageBatch.Clear();
-
-			var topicPrefix = $"{_options.TopicPrefix}/";
 			_logger.LogDebug("Processing batch with {Count} messages: [{Topics}]", 
-				batchSnapshot.Count, 
-				string.Join(", ", batchSnapshot.Keys.Select(k => k.Replace(topicPrefix, ""))));
+				_messageBatch.Count, 
+				string.Join(", ", _messageBatch.Keys.Select(k => k.Replace(topicPrefix, ""))));
 
-			// process each message in the batch
-			foreach (var (topic, payload) in batchSnapshot) {
-				ProcessSingleMessage(topic, payload);
+			double? sessionEnergy = _messageBatch.TryGetValue($"{topicPrefix}/session_energy", out var energyStr) && double.TryParse(energyStr, out var energyDbl) ? energyDbl : null;
+			int? sessionElapsed = _messageBatch.TryGetValue($"{topicPrefix}/session_elapsed", out var elapsedStr) && int.TryParse(elapsedStr, out var elapsedInt) ? elapsedInt : null;
+
+			if (_messageBatch.TryGetValue($"{topicPrefix}/amp", out var ampStr) && double.TryParse(ampStr, out var amps)) {
+				_metricsService.RecordEvAmps(amps);
+			}
+
+			if (_messageBatch.TryGetValue($"{topicPrefix}/power", out var powerStr) && double.TryParse(powerStr, out var power)) {
+				_metricsService.RecordEvPower(power);
+			}
+
+			if (sessionEnergy.HasValue) {
+				_metricsService.RecordEvSessionEnergy(sessionEnergy.Value);
+
+				var now = DateTime.UtcNow;
+				var delta = sessionEnergy.Value >= _lastEnergy 
+					? sessionEnergy.Value - _lastEnergy 
+					: sessionEnergy.Value; // session reset detected
+
+				if (sessionEnergy.Value < _lastEnergy) {
+					_logger.LogInformation("New charging session detected. Session energy reset from {Previous}Wh to {Current}Wh", _lastEnergy, sessionEnergy);
+					// Reset timestamp on new session
+					_lastEnergyTimestamp = now;
+				}
+
+				if (delta > 0 && _lastEnergyTimestamp != DateTime.MinValue) {
+					_metricsService.RecordEvConsumed(delta);
+					_evChannel.Writer.TryWrite(new EnergyRecord(_lastEnergyTimestamp, now, delta));
+					_logger.LogDebug("EV energy delta: {Delta:F2} Wh over {Duration:F1}s", delta, (now - _lastEnergyTimestamp).TotalSeconds);
+				} else if (_lastEnergyTimestamp == DateTime.MinValue) {
+					_logger.LogDebug("Skipping first EV energy measurement - establishing baseline");
+				}
+
+				_lastEnergy = sessionEnergy.Value;
+				_lastEnergyTimestamp = now;
+			}
+
+			if (_messageBatch.TryGetValue($"{topicPrefix}/vehicle", out var vehicleStr)) {
+				_metricsService.RecordVehicleConnected(int.TryParse(vehicleStr, out var vehicleInt) && vehicleInt == 1);
+			}
+
+			if (sessionElapsed.HasValue) {
+				_metricsService.RecordSessionElapsed(sessionElapsed.Value);
 			}
 
 			_logger.LogDebug("Batch processing completed successfully");
 		} catch (Exception ex) {
 			_logger.LogError(ex, "Error during batch processing");
-		}
-	}
-
-	private void ProcessSingleMessage(string topic, string payload)
-	{
-		var topicPrefix = _options.TopicPrefix.TrimEnd('/');
-		switch (topic) {
-			case var t when t == $"{topicPrefix}/amp":
-				// amp is in 1/10 A increments, so divide by 10 to get actual amps
-				if (double.TryParse(payload, out var ampsTenths)) {
-					_metricsService.RecordEvAmps(ampsTenths / 10.0);
-				} else {
-					_logger.LogWarning("Failed to parse amp value: {Payload}", payload);
-				}
-				break;
-
-			case var t when t == $"{topicPrefix}/power":
-				// power is in watts
-				if (double.TryParse(payload, out var power)) {
-					_metricsService.RecordEvPower(power);
-				} else {
-					_logger.LogWarning("Failed to parse power value: {Payload}", payload);
-				}
-				break;
-
-			case var t when t == $"{topicPrefix}/session_energy":
-				// energy is in wH for this session
-				if (double.TryParse(payload, out var sessionEnergy)) {
-					// record the value in the gauge
-					_metricsService.RecordEvSessionEnergy(sessionEnergy);
-
-					var now = DateTime.UtcNow;
-					var delta = sessionEnergy >= _lastEnergy 
-						? sessionEnergy - _lastEnergy 
-						: sessionEnergy; // session reset detected
-
-					if (sessionEnergy < _lastEnergy) {
-						_logger.LogInformation("New charging session detected. Session energy reset from {Previous}Wh to {Current}Wh", _lastEnergy, sessionEnergy);
-						// Reset timestamp on new session
-						_lastEnergyTimestamp = now;
-					}
-
-					if (delta > 0 && _lastEnergyTimestamp != DateTime.MinValue) {
-						_metricsService.RecordEvConsumed(delta);
-						_evChannel.Writer.TryWrite(new EnergyRecord(_lastEnergyTimestamp, now, delta));
-						_logger.LogDebug("EV energy delta: {Delta:F2} Wh over {Duration:F1}s", delta, (now - _lastEnergyTimestamp).TotalSeconds);
-					} else if (_lastEnergyTimestamp == DateTime.MinValue) {
-						_logger.LogDebug("Skipping first EV energy measurement - establishing baseline");
-					}
-
-					_lastEnergy = sessionEnergy;
-					_lastEnergyTimestamp = now;
-				} else {
-					_logger.LogWarning("Failed to parse session energy value: {Payload}", payload);
-				}
-				break;
-
-			case var t when t == $"{topicPrefix}/vehicle":
-				// 1 if car connected, 0 otherwise
-				if (int.TryParse(payload, out var vehicleStatus)) {
-					_metricsService.RecordVehicleConnected(vehicleStatus == 1);
-				} else {
-					_logger.LogWarning("Failed to parse vehicle status: {Payload}", payload);
-				}
-				break;
-
-			case var t when t == $"{topicPrefix}/session_elapsed":
-				// session time in seconds
-				if (int.TryParse(payload, out var sessionElapsed)) {
-					_metricsService.RecordSessionElapsed(sessionElapsed);
-				} else {
-					_logger.LogWarning("Failed to parse session elapsed time: {Payload}", payload);
-				}
-				break;
-
-			default:
-				_logger.LogWarning("Received message on unhandled topic: {Topic}", topic);
-				break;
+		} finally {
+			_messageBatch.Clear();
 		}
 	}
 }
