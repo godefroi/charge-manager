@@ -32,96 +32,96 @@ public class EnvoyCollectorService(EnvoyClient envoyClient, [FromKeyedServices("
 			await ConnectMqttClient(_mqttClient, _logger);
 		}
 
-		_collectTask = Task.Factory.StartNew(DoCollectorThings, TaskCreationOptions.LongRunning);
+		_collectTask = DoCollectorThings();
 	}
 
 	public Task StopAsync(CancellationToken cancellationToken)
 	{
 		_cancelSource.Cancel();
-		_collectTask?.Wait(cancellationToken);
+
+		try {
+			_collectTask?.Wait(5000, cancellationToken);
+		} catch (AggregateException ae) when (ae.InnerException is TaskCanceledException) {
+			// ignore
+		}
+
 		return Task.CompletedTask;
 	}
 
 	private async Task DoCollectorThings()
 	{
-		var topicPrefix = _options.TopicPrefix?.TrimEnd('/');
-		var lastRun     = Stopwatch.GetTimestamp();
-
 		while (!_cancelSource.IsCancellationRequested) {
-			try {
-				// wait however much time we need to to get to the next scheduled report
-				var wait = _interval - Stopwatch.GetElapsedTime(lastRun);
-
-				if (wait > TimeSpan.Zero) {
-					await Task.Delay(wait, _cancelSource.Token);
-				}
-
-				lastRun = Stopwatch.GetTimestamp();
-
-				if (_cancelSource.IsCancellationRequested) {
-					break;
-				}
-
-				// get a meter report
-				var mr = await _envoyClient.GetMeterReports(_cancelSource.Token);
-
-				if (mr == null) {
-					continue;
-				}
-
-			// publish metrics to mqtt to enable OpenEVSE to manage the PV divert (eco mode)
-			if (!string.IsNullOrWhiteSpace(topicPrefix)) {
-				await PublishMetric($"{topicPrefix}/production", mr.CurrentProductionWatts);
-				await PublishMetric($"{topicPrefix}/consumption", mr.CurrentTotalConsumptionWatts);
-				await PublishMetric($"{topicPrefix}/import", mr.CurrentNetConsumptionWatts);
+			if (!string.IsNullOrWhiteSpace(_options.TopicPrefix)) {
+				await ConnectMqttClient(_mqttClient, _logger);
 			}
 
-			// record metrics for otel export
-				_metricsService.RecordProduction(mr.CurrentProductionWatts);
-				_metricsService.RecordConsumption(mr.CurrentTotalConsumptionWatts);
-				_metricsService.RecordImport(mr.CurrentNetConsumptionWatts);
+			var topicPrefix = _options.TopicPrefix?.TrimEnd('/');
 
-				// write grid import delta to channel for ImportTrackingService
-				// use the actual measurement timestamp from the Envoy
-				if (mr.NetConsumption != null) {
-					var currentTimestamp  = mr.NetConsumption.CreatedAt.UtcDateTime;
-					var currentCumulative = mr.CumulativeDeliveredWh;
+			using var timer = new PeriodicTimer(_interval);
 
-					if (_lastImportTimestamp != DateTime.MinValue) {
-						var delta = currentCumulative - _lastCumulativeImport; // TODO: validate that this is showing what we think it is (i.e. the total imported from the grid)
+			while (await timer.WaitForNextTickAsync(_cancelSource.Token)) {
+				try {
+					// get a meter report
+					var mr = await _envoyClient.GetMeterReports(_cancelSource.Token);
 
-						_logger.LogDebug("Solar data: duration: {duration:F1} delta: {delta:F1}, instantaneous: {instantaneous:F1} estimated: {estimated:F1}",
-							(currentTimestamp - _lastImportTimestamp).TotalSeconds,
-							delta,
-							mr.CurrentNetConsumptionWatts,
-							mr.CurrentNetConsumptionWatts * (currentTimestamp - _lastImportTimestamp).TotalSeconds / 3600d);
-
-						// Write record for positive deltas (actual import) or zero (no import)
-						// This ensures the tracking service knows what intervals have been covered
-						if (delta >= 0) {
-							await _importChannel.Writer.WriteAsync(new EnergyRecord(_lastImportTimestamp, currentTimestamp, delta), _cancelSource.Token);
-							_logger.LogDebug("Grid import delta: {Delta:F2} Wh over {Duration:F1}s", delta, (currentTimestamp - _lastImportTimestamp).TotalSeconds);
-						} else {
-							// Negative delta indicates net export - write a zero delta record
-							// so the tracking service knows this interval has been covered
-							await _importChannel.Writer.WriteAsync(new EnergyRecord(_lastImportTimestamp, currentTimestamp, 0.0), _cancelSource.Token);
-							_logger.LogDebug("Grid import delta: {Delta:F2} Wh over {Duration:F1}s (writing zero import record for interval coverage)", delta, (currentTimestamp - _lastImportTimestamp).TotalSeconds);
-						}
-					} else {
-						_logger.LogDebug("Skipping first grid import measurement - establishing baseline");
+					if (mr == null) {
+						continue;
 					}
 
-					_lastCumulativeImport = currentCumulative;
-					_lastImportTimestamp = currentTimestamp;
-				}
+					// publish metrics to mqtt to enable OpenEVSE to manage the PV divert (eco mode)
+					if (!string.IsNullOrWhiteSpace(topicPrefix)) {
+						await PublishMetric($"{topicPrefix}/production", mr.CurrentProductionWatts);
+						await PublishMetric($"{topicPrefix}/consumption", mr.CurrentTotalConsumptionWatts);
+						await PublishMetric($"{topicPrefix}/import", mr.CurrentNetConsumptionWatts);
+					}
 
-				// log some diagnostic info
-				logger.LogDebug("Solar data: [production: {production} consumption: {consumption} import: {import}]", mr?.CurrentProductionWatts, mr?.CurrentTotalConsumptionWatts, mr?.CurrentNetConsumptionWatts);
-			} catch (TaskCanceledException) {
-				// swallow task cancelled exception and exit the loop
-				break;
-			} catch (Exception e) {
-				logger.LogError(e, "An error occurred.");
+					// record metrics for otel export
+					_metricsService.RecordProduction(mr.CurrentProductionWatts);
+					_metricsService.RecordConsumption(mr.CurrentTotalConsumptionWatts);
+					_metricsService.RecordImport(mr.CurrentNetConsumptionWatts);
+
+					// write grid import delta to channel for ImportTrackingService
+					// use the actual measurement timestamp from the Envoy
+					if (mr.NetConsumption != null) {
+						var currentTimestamp  = mr.NetConsumption.CreatedAt.UtcDateTime;
+						var currentCumulative = mr.CumulativeDeliveredWh;
+
+						if (_lastImportTimestamp != DateTime.MinValue) {
+							var delta = currentCumulative - _lastCumulativeImport; // TODO: validate that this is showing what we think it is (i.e. the total imported from the grid)
+
+							_logger.LogDebug("Solar data: duration: {duration:F1} delta: {delta:F1}, instantaneous: {instantaneous:F1} estimated: {estimated:F1}",
+								(currentTimestamp - _lastImportTimestamp).TotalSeconds,
+								delta,
+								mr.CurrentNetConsumptionWatts,
+								mr.CurrentNetConsumptionWatts * (currentTimestamp - _lastImportTimestamp).TotalSeconds / 3600d);
+
+							// Write record for positive deltas (actual import) or zero (no import)
+							// This ensures the tracking service knows what intervals have been covered
+							if (delta >= 0) {
+								await _importChannel.Writer.WriteAsync(new EnergyRecord(_lastImportTimestamp, currentTimestamp, delta), _cancelSource.Token);
+								_logger.LogDebug("Grid import delta: {Delta:F2} Wh over {Duration:F1}s", delta, (currentTimestamp - _lastImportTimestamp).TotalSeconds);
+							} else {
+								// Negative delta indicates net export - write a zero delta record
+								// so the tracking service knows this interval has been covered
+								await _importChannel.Writer.WriteAsync(new EnergyRecord(_lastImportTimestamp, currentTimestamp, 0.0), _cancelSource.Token);
+								_logger.LogDebug("Grid import delta: {Delta:F2} Wh over {Duration:F1}s (writing zero import record for interval coverage)", delta, (currentTimestamp - _lastImportTimestamp).TotalSeconds);
+							}
+						} else {
+							_logger.LogDebug("Skipping first grid import measurement - establishing baseline");
+						}
+
+						_lastCumulativeImport = currentCumulative;
+						_lastImportTimestamp = currentTimestamp;
+					}
+
+					// log some diagnostic info
+					logger.LogDebug("Solar data: [production: {production} consumption: {consumption} import: {import}]", mr?.CurrentProductionWatts, mr?.CurrentTotalConsumptionWatts, mr?.CurrentNetConsumptionWatts);
+				} catch (TaskCanceledException) {
+					// swallow task cancelled exception and exit the loop
+					break;
+				} catch (Exception e) {
+					logger.LogError(e, "An error occurred.");
+				}
 			}
 		}
 	}
