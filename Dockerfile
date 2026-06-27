@@ -1,10 +1,10 @@
 # Stage 1: Build
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 
 WORKDIR /src
 
 # Copy the solution and project files
-COPY src/charge-manager.slnx ./
+COPY charge-manager.slnx ./
 COPY src/ChargeManager/ChargeManager.csproj ./ChargeManager/
 
 # Restore dependencies
@@ -20,7 +20,7 @@ RUN dotnet build ./ChargeManager/ChargeManager.csproj -c Release -o /app/build
 RUN dotnet publish ./ChargeManager/ChargeManager.csproj -c Release -o /app/publish
 
 # Stage 2: Runtime
-FROM mcr.microsoft.com/dotnet/runtime:9.0
+FROM mcr.microsoft.com/dotnet/runtime:10.0
 
 WORKDIR /app
 
