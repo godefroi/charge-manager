@@ -1,3 +1,6 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ChargeManager.Tests/ChargeManager.Tests.csproj" />
+  </Folder>
   <Project Path="src/ChargeManager/ChargeManager.csproj" />
 </Solution>
