@@ -35,7 +35,8 @@ public class EnvoyTlsHandler : HttpClientHandler
 				return false;
 			}
 
-			if (!commonName.EndsWith(_deviceSerial)) {
+			// it appears that the common name used to *end* with the serial, and now it *begins* with the serial
+			if (!commonName.StartsWith(_deviceSerial) && !commonName.EndsWith(_deviceSerial)) {
 				_logger.LogError("Certificate common name '{commonName}' does not match device serial '{deviceSerial}'", commonName, _deviceSerial);
 				return false;
 			}
