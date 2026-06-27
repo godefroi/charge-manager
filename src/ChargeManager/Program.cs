@@ -14,6 +14,7 @@ using OpenTelemetry.Resources;
 using OpenTelemetry.Exporter;
 using System.Reflection;
 using System.Threading.Channels;
+using System.Security;
 
 namespace ChargeManager;
 
@@ -95,7 +96,7 @@ internal class Program
 
 			if (!string.IsNullOrEmpty(config.Username)) {
 				options.UserName = config.Username;
-				options.Password = config.Password;
+				options.Password = MakeSecureString(config.Password);
 			}
 
 			return new HiveMQClient(options);
@@ -112,7 +113,7 @@ internal class Program
 
 			if (!string.IsNullOrEmpty(config.Username)) {
 				options.UserName = config.Username;
-				options.Password = config.Password;
+				options.Password = MakeSecureString(config.Password);
 			}
 
 			return new HiveMQClient(options);
@@ -125,5 +126,22 @@ internal class Program
 		var host = builder.Build();
 
 		await host.RunAsync();
+	}
+
+	private static SecureString? MakeSecureString(string? str)
+	{
+		if (str == null) {
+			return null;
+		}
+
+		var ret = new SecureString();
+
+		foreach (var c in str) {
+			ret.AppendChar(c);
+		}
+
+		ret.MakeReadOnly();
+
+		return ret;
 	}
 }
